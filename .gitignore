@@ -1,0 +1,32 @@
+# Real data (brand, stores, quantities) - not pushed to GitHub
+data/
+*.xlsx
+*.xls
+*.csv
+
+# Virtual environment
+venv/
+env/
+.venv/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Generated outputs (picking PDFs, etc.) - from Week 3 onward
+outputs/
+*.pdf
+
+# System
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
