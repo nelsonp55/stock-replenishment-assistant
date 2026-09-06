@@ -4,6 +4,9 @@ data/
 *.xls
 *.csv
 
+# Secrets - API keys must never be committed
+.streamlit/secrets.toml
+
 # Virtual environment
 venv/
 env/
@@ -19,7 +22,7 @@ __pycache__/
 *.pyo
 *.egg-info/
 
-# Generated outputs (picking PDFs, etc.) - from Week 3 onward
+# Generated outputs (replenishment documents, stock exports)
 outputs/
 *.pdf
 
