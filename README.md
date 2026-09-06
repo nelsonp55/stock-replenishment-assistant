@@ -1,51 +1,148 @@
-# Stock Replenishment Chatbot
+# Stock Replenishment Assistant
 
-Final project for the bootcamp (End to End Data Science Project).
+A chatbot that helps footwear store managers find out what stock they can pull from the central warehouse, and turns the answer into a printable picking list.
 
-## Project Goal
+Final project for the Ironhack Data Science bootcamp.
 
-Stock management system with a chatbot interface, simulating the replenishment flow between headquarters (central warehouse) and stores.
+---
 
-**Core flow:**
-1. The user requests, via chatbot, the replenishment of a specific brand for a specific store.
-2. The system checks available stock at headquarters.
-3. If stock is available, it generates a picking/separation PDF document.
+## The problem
 
-The system is **stateless by design** — there are no database writes. The generated PDF is the output artifact itself.
+A retail chain holds stock in a central warehouse (HQ) and in its stores. When a store runs out of a size, someone has to check whether HQ has it, work out what is worth sending, and write a list for the warehouse team to pick physically. That check is manual and slow.
 
-## Dataset
+This project automates the check. A store manager asks a question in plain language, the system looks it up in the stock data, and produces an Excel document ready for picking.
 
-Real product data (brand, reference, size, location, quantity), with anonymized store names. The dataset distinguishes three warehouse types:
-- **Warehouse 1** — Headquarters (stock source for replenishment)
-- **Warehouse 2** — Stores (core of the business)
-- **Warehouse 5** — Outlets (selling old stock)
+---
 
-## Repository Structure
+## How it works
+
+The user types a question. A language model reads it and decides which query function to call and with what arguments. The function runs against the dataset and returns real figures. The model then presents those figures.
+
+The model never produces stock numbers itself — it only routes the question. Every quantity shown comes from the data.
+
+```
+user question -> LLM (routing) -> Python query function -> dataset -> answer
+```
+
+### Replenishment logic
+
+For a given store, the system finds sizes that HQ has in stock but the store does not.
+
+It only looks at references the store already carries. The goal is filling gaps in an existing assortment, not sending new models — otherwise "replenish this store" would return the entire HQ catalogue.
+
+### Session allocation
+
+Stock is never written back to the dataset. But if two stores are replenished in the same working session, the second one should not be offered stock already committed to the first.
+
+So generated documents are recorded in memory, keyed by reference and size, and subtracted from HQ availability for the rest of the session. Queries alone never commit anything — only generating a document does.
+
+---
+
+## Data
+
+`dataset_final_project.xlsx` — a stock snapshot from a real footwear retailer. Not included in the repository.
+
+Store names in the project are fictional and the data is anonymised.
+
+Preparation steps, all documented in the notebook:
+
+- Kept warehouses 1 (HQ), 2 (stores) and 5 (outlets)
+- Footwear only (194 product families reduced to one)
+- Negative quantities treated as 0 (incomplete transfers in the source system)
+- Brand names unified (`Fila apparel_acc` -> `Fila`, `Munich Sports` -> `Munich`, `Merrell Aces` -> `Merrell Foot`)
+- Sizes converted to a single numeric scale from 8 different source formats (comma decimals, ranges like `39-40` and `3940`, 3-digit half-size codes like `135`, US kids `5Y`/`10C`)
+- Scope narrowed to the 6 highest-volume stores, plus HQ as the stock source
+
+---
+
+## Project structure
 
 ```
 FinalProject/
-├── notebooks/     # exploration and EDA
-├── data/          # dataset (not versioned - see .gitignore)
-├── src/           # reusable Python code (replenishment logic, PDF generation, chatbot)
-├── outputs/       # generated picking PDFs (not versioned)
-├── requirements.txt
-└── README.md
+├── app.py                        Streamlit chat interface
+├── src/
+│   └── replenishment.py          data loading and query functions
+├── notebooks/
+│   └── eda_final_project.ipynb   preparation, EDA, function documentation
+├── data/                         dataset (not in repo)
+├── outputs/                      generated Excel files
+└── requirements.txt
 ```
 
-## Timeline
+The query functions live in `src/` so the notebook and the app share the same code instead of keeping two copies that drift apart.
 
-| Week | Dates | Focus |
-|---|---|---|
-| 1 | Aug 18–24 | Data cleaning and EDA |
-| 2 | Aug 25–31 | Replenishment logic in Python (no chatbot) |
-| 3 | Sep 1–5 | PDF generation + basic Streamlit dashboard |
-| 4 | Sep 6–9 | Chatbot v1 with structured commands (function calling) |
-| 5 | Sep 10–12 | Documentation, GitHub organization, slides, presentation rehearsal |
+---
 
-## How to Run the Project
+## Functions
 
-_(to be filled in as the project progresses)_
+| Function | What it does |
+|---|---|
+| `find_replenishable_sizes` | Sizes HQ has and a store doesn't, for references the store carries |
+| `generate_replenishment_document` | Printable Excel picking list; commits the stock |
+| `find_reference` | Where a reference exists, by prefix, with quantities per size |
+| `get_quantity` | Stock totals by store and/or brand |
+| `find_model_by_type` | Where a brand or reference exists, grouped by HQ / store / outlet |
+| `export_stock` | Full store stock as an Excel size grid |
 
-## Author
+All of them take the cleaned dataframe as their first argument, so the module holds no hidden state and Streamlit can cache the data.
 
-Nelson — Ironhack Bootcamp, Data Science
+---
+
+## Running it
+
+Requires Python 3.10+ and an OpenAI API key.
+
+```bash
+pip install -r requirements.txt
+```
+
+Put the key in `.streamlit/secrets.toml`:
+
+```toml
+OPENAI_API_KEY = "sk-..."
+```
+
+Place the dataset in `data/dataset_final_project.xlsx`, then:
+
+```bash
+streamlit run app.py
+```
+
+### Example questions
+
+```
+What can I replenish in Loja Amoreiras?
+Which Nike sizes are missing in Loja Colombo?
+Where is reference DH2920?
+How much stock does Outlet Gaia have?
+```
+
+---
+
+## Design decisions
+
+**The LLM routes, it doesn't calculate.** Function calling maps intent to deterministic Python. Nothing about stock is generated by the model.
+
+**Querying is not committing.** Managers can explore freely without locking stock. Allocation happens only when a document is generated.
+
+**No database.** Session state was enough for the problem and avoided a persistence layer that the deadline didn't allow.
+
+**Chat plus a confirmation form.** Asking is natural language; deciding how many units to send is a form field. Forcing "yes, generate with 1 unit per size" through the chat would be worse than a button.
+
+**Excel, not PDF.** The project already had `openpyxl` infrastructure from the stock export. Reusing it was faster than adding a PDF library, and the output is just as printable.
+
+---
+
+## Scope and limitations
+
+- Replenishment works at reference and size level. Deciding *how many* units a store needs would require sales history, which the dataset doesn't have.
+- Allocation is per session. Closing the app resets it.
+- 75 rows (0.3%) use non-numeric sizes (`UNI`, `S`, `M`) and are excluded from size comparisons, though still counted in totals.
+- US kids sizes (`5Y`, `10C`) keep their number and are not converted to EU sizing.
+- Reference typos involving character transposition are not detected.
+
+---
+
+## Built with
+
+Python, pandas, Streamlit, OpenAI API (function calling), openpyxl, matplotlib, seaborn
