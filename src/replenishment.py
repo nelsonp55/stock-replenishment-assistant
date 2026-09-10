@@ -162,13 +162,20 @@ def resolve_store_id(store_input):
         return store_input
 
     reverse_names = {name.lower(): store_id for store_id, name in STORE_NAMES.items()}
-    match = reverse_names.get(store_input.lower())
+    typed = store_input.lower()
+
+    match = reverse_names.get(typed)
     if match:
         return match
 
+    # accept partial names: 'Amoreiras' for 'Loja Amoreiras', 'Gaia' for 'Outlet Gaia'
+    partial = [sid for name, sid in reverse_names.items() if typed in name]
+    if len(partial) == 1:
+        return partial[0]
+
     raise ValueError(
         f"Store not recognized: '{store_input}'. "
-        f"Options: {list(STORE_NAMES.values())}, 'HQ', or {SELECTED_STORES}"
+        f"Valid stores: {', '.join(STORE_NAMES[s] for s in SELECTED_STORES)}."
     )
 
 
@@ -192,9 +199,20 @@ def normalize_brands(df, brand_input):
     lookup = {b.lower(): b for b in all_brands}
     resolved = []
     for b in brand_input:
-        match = lookup.get(str(b).strip().lower())
+        typed = str(b).strip().lower()
+        match = lookup.get(typed)
+
+        # accept partial names: 'On' for 'On Running', 'Merrell' for 'Merrell Foot'
         if not match:
-            raise ValueError(f"Brand not recognized: '{b}'. Options: {all_brands}")
+            partial = [full for low, full in lookup.items() if low.startswith(typed)]
+            if len(partial) == 1:
+                match = partial[0]
+
+        if not match:
+            raise ValueError(
+                f"Brand not recognized: '{b}'. "
+                f"Valid brands: {', '.join(all_brands)}."
+            )
         resolved.append(match)
     return resolved
 
@@ -219,7 +237,14 @@ def export_stock(df, store_input=None, brand_input=None, filename=None):
     multi_brand = len(brands) > 1
 
     if filename is None:
-        filename = 'stock_export.xlsx'
+        # readable name: store and date when a single store was asked for
+        today = datetime.now().strftime('%Y-%m-%d')
+        if len(store_ids) == 1:
+            label = STORE_NAMES.get(store_ids[0], store_ids[0])
+            safe_store = re.sub(r'[^A-Za-z0-9]+', '_', label).strip('_')
+            filename = f"stock_now_{safe_store}_{today}.xlsx"
+        else:
+            filename = f"stock_now_all_stores_{today}.xlsx"
     filename = resolve_output_path(filename)
 
     data = df[
@@ -410,21 +435,99 @@ def find_model_by_type(df, reference_input=None, brand_input=None):
 
 
 # --------------------------------------------------------------------------
-# 5 - Replenishment: missing sizes
+# 5 - Detailed stock listing
+# --------------------------------------------------------------------------
+
+STOCK_DETAIL_COLUMNS = ['BRAND', 'REFERENCE', 'DESCRIPTION', 'ITEM_TYPE', 'SIZE', 'QUANTITY']
+
+
+def get_stock_detail(df, store_input=None, brand_input=None, reference_input=None):
+    """List the stock held, one row per reference and size.
+
+    store_input=None covers every selected store, and adds a STORE column so the
+    rows stay readable. Unlike get_quantity, which returns totals, this returns
+    the actual rows so they can be shown as a table or exported.
+    """
+    store_ids = normalize_stores(store_input)
+    multi_store = len(store_ids) > 1
+    columns = (['STORE'] + STOCK_DETAIL_COLUMNS) if multi_store else STOCK_DETAIL_COLUMNS
+
+    data = df[(df['STORE_ID'].isin(store_ids)) & (df['QUANTITY'] > 0)].copy()
+
+    if brand_input is not None:
+        data = data[data['BRAND'].isin(normalize_brands(df, brand_input))]
+
+    if reference_input is not None:
+        ref = str(reference_input).strip().upper()
+        data = data[data['REFERENCE'].astype(str).str.upper().str.startswith(ref)]
+
+    if data.empty:
+        return pd.DataFrame(columns=columns)
+
+    group_cols = ['STORE_ID', 'BRAND', 'REFERENCE', 'DESCRIPTION', 'ITEM_TYPE', 'SIZE_NUMERIC']
+    detail = data.groupby(group_cols, as_index=False)['QUANTITY'].sum()
+
+    detail['STORE'] = detail['STORE_ID'].map(STORE_NAMES).fillna(detail['STORE_ID'])
+    detail['SIZE'] = detail['SIZE_NUMERIC'].apply(
+        lambda v: format_size_label(v) if pd.notna(v) else ''
+    )
+    detail['QUANTITY'] = detail['QUANTITY'].astype(int)
+
+    sort_cols = (['STORE'] if multi_store else []) + ['BRAND', 'DESCRIPTION', 'REFERENCE', 'SIZE_NUMERIC']
+    detail = detail.sort_values(sort_cols)
+
+    return detail[columns].reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------
+# 6 - Replenishment: missing sizes
 # --------------------------------------------------------------------------
 
 REPLENISHMENT_COLUMNS = ['BRAND', 'REFERENCE', 'DESCRIPTION', 'ITEM_TYPE',
                          'SIZE', 'HQ_AVAILABLE', 'SEND_QTY']
 
 
-def find_replenishable_sizes(df, store_input, brand_input=None, reference_input=None,
+def _replenish_all_stores(df, brand_input, reference_input, allocated, units_per_size):
+    """Run the replenishment query for every store, allocating as it goes."""
+    running = dict(allocated or {})
+    frames = []
+
+    for store_id in SELECTED_STORES:
+        part = find_replenishable_sizes(
+            df, store_id, brand_input, reference_input, running, units_per_size
+        )
+        if part.empty:
+            continue
+
+        part = part.copy()
+        part.insert(0, 'STORE', STORE_NAMES.get(store_id, store_id))
+        frames.append(part)
+
+        # what this store takes is unavailable to the next one
+        for ref, size, qty in zip(part['REFERENCE'], part['SIZE'], part['SEND_QTY']):
+            running[(ref, size)] = running.get((ref, size), 0) + int(qty)
+
+    if not frames:
+        return pd.DataFrame(columns=['STORE'] + REPLENISHMENT_COLUMNS)
+
+    return pd.concat(frames, ignore_index=True)
+
+
+def find_replenishable_sizes(df, store_input=None, brand_input=None, reference_input=None,
                              allocated=None, units_per_size=None):
-    """Find sizes HQ has but the store does not, for references the store already carries.
+    """Find sizes HQ has but a store does not, for references the store already carries.
+
+    store_input=None covers every selected store. Stores are processed in order and
+    each one's proposal is discounted from HQ before the next is calculated, so the
+    same unit is never offered twice; the order therefore decides who gets scarce stock.
 
     allocated: {(REFERENCE, SIZE): qty} already committed earlier in the session,
     subtracted from HQ availability so the same units are never proposed twice.
     units_per_size: units to send per missing size (None means everything available).
     """
+    if store_input is None:
+        return _replenish_all_stores(df, brand_input, reference_input, allocated, units_per_size)
+
     store_id = resolve_store_id(store_input)
     if store_id == HQ_ID:
         raise ValueError("HQ is the stock source, not a replenishment target.")
@@ -492,13 +595,106 @@ def find_replenishable_sizes(df, store_input, brand_input=None, reference_input=
     return missing[REPLENISHMENT_COLUMNS].reset_index(drop=True)
 
 
-def generate_replenishment_document(df, store_input, brand_input=None, reference_input=None,
+def _document_all_stores(df, brand_input, reference_input, allocated,
+                         units_per_size, filename):
+    """Write one picking document covering every store, one sheet each."""
+    result = find_replenishable_sizes(df, None, brand_input, reference_input,
+                                      allocated, units_per_size)
+    if result.empty:
+        raise ValueError("Nothing to replenish in any store with these filters.")
+
+    if filename is None:
+        today = datetime.now().strftime('%Y-%m-%d')
+        filename = f"stock_replenishment_all_stores_{today}.xlsx"
+    filename = resolve_output_path(filename)
+
+    new_allocated = dict(allocated or {})
+
+    with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+        for store_label, part in result.groupby('STORE', sort=False):
+            sheet = part[['BRAND', 'REFERENCE', 'DESCRIPTION', 'ITEM_TYPE', 'SIZE',
+                          'SEND_QTY']].rename(columns={'SEND_QTY': 'QTY'})
+            sheet['PICKED'] = ''
+            sheet.to_excel(writer, sheet_name=str(store_label)[:31], index=False, startrow=3)
+
+    wb = load_workbook(filename)
+    yellow_fill = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
+    thin = Side(style='thin', color='999999')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    today_label = datetime.now().strftime('%d/%m/%Y %H:%M')
+
+    for ws in wb.worksheets:
+        part = result[result['STORE'] == ws.title]
+        n_cols = 7
+        last_col = get_column_letter(n_cols)
+        last_row = 4 + len(part)
+
+        ws['A1'] = f"REPLENISHMENT — {ws.title.upper()}"
+        ws['A1'].font = Font(name='Arial', size=14, bold=True)
+        ws.merge_cells(f"A1:{last_col}1")
+
+        info = []
+        if brand_input:
+            info.append(f"Brand: {brand_input}")
+        if reference_input:
+            info.append(f"Reference: {reference_input}")
+        info.append(f"Lines: {len(part)}")
+        info.append(f"Total units: {int(part['SEND_QTY'].sum())}")
+        info.append(today_label)
+
+        ws['A2'] = "  |  ".join(info)
+        ws['A2'].font = Font(name='Arial', size=9, italic=True)
+        ws.merge_cells(f"A2:{last_col}2")
+
+        for cell in ws[4]:
+            cell.font = Font(name='Arial', size=10, bold=True)
+            cell.fill = yellow_fill
+            cell.border = border
+            cell.alignment = Alignment(horizontal='center')
+
+        for row in ws.iter_rows(min_row=5, max_row=last_row, max_col=n_cols):
+            for cell in row:
+                cell.font = Font(name='Arial', size=10)
+                cell.border = border
+            row[4].alignment = Alignment(horizontal='center')
+            row[5].alignment = Alignment(horizontal='center')
+
+        for col_idx, column_cells in enumerate(ws.columns, start=1):
+            values = [c.value for c in column_cells if c.value is not None and c.row >= 4]
+            max_len = max((len(str(v)) for v in values), default=8)
+            ws.column_dimensions[get_column_letter(col_idx)].width = min(max_len + 3, 45)
+        ws.column_dimensions[last_col].width = 10
+
+        ws.freeze_panes = 'A5'
+        ws.print_area = f"A1:{last_col}{last_row}"
+        ws.print_title_rows = '4:4'
+        ws.page_setup.orientation = 'portrait'
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 0
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.page_margins.left = ws.page_margins.right = 0.4
+        ws.oddFooter.right.text = "Page &P of &N"
+
+    wb.save(filename)
+
+    # commit the stock: this is the only moment it leaves HQ
+    for ref, size, qty in zip(result['REFERENCE'], result['SIZE'], result['SEND_QTY']):
+        new_allocated[(ref, size)] = new_allocated.get((ref, size), 0) + int(qty)
+
+    return filename, new_allocated
+
+
+def generate_replenishment_document(df, store_input=None, brand_input=None, reference_input=None,
                                     allocated=None, units_per_size=None, filename=None):
     """Generate the printable picking document and return the updated allocation record.
 
     Returns (filename, new_allocated). This is the only moment stock is considered
     committed; queries alone never allocate anything.
     """
+    if store_input is None:
+        return _document_all_stores(df, brand_input, reference_input, allocated,
+                                    units_per_size, filename)
+
     store_id = resolve_store_id(store_input)
     store_label = STORE_NAMES.get(store_id, store_id)
 
@@ -508,7 +704,10 @@ def generate_replenishment_document(df, store_input, brand_input=None, reference
         raise ValueError(f"Nothing to replenish for {store_label} with these filters.")
 
     if filename is None:
-        filename = f"replenishment_{store_id}.xlsx"
+        # readable name: store and date, safe for any file system
+        safe_store = re.sub(r'[^A-Za-z0-9]+', '_', store_label).strip('_')
+        today = datetime.now().strftime('%Y-%m-%d')
+        filename = f"stock_replenishment_{safe_store}_{today}.xlsx"
     filename = resolve_output_path(filename)
 
     # HQ_AVAILABLE stays out of the document: only the quantity to pick is printed
