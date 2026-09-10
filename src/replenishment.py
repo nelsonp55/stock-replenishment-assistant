@@ -21,7 +21,7 @@ from openpyxl.utils import get_column_letter
 
 # project root, resolved from this file so paths work from any working directory
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_PATH = PROJECT_ROOT / 'data' / 'dataset_final_project.xlsx'
+DATA_PATH = PROJECT_ROOT / 'data' / 'stock_snapshot.xlsx'
 OUTPUT_DIR = PROJECT_ROOT / 'outputs'
 
 # the 6 stores selected by volume, plus HQ as the stock source

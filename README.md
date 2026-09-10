@@ -40,7 +40,7 @@ So generated documents are recorded in memory, keyed by reference and size, and 
 
 ## Data
 
-`dataset_final_project.xlsx` — a stock snapshot from a real footwear retailer. Not included in the repository.
+`stock_snapshot.xlsx` — a stock snapshot from a real footwear retailer. Not included in the repository.
 
 Store names in the project are fictional and the data is anonymised.
 
@@ -63,7 +63,7 @@ FinalProject/
 ├── src/
 │   └── replenishment.py          data loading and query functions
 ├── notebooks/
-│   └── eda_final_project.ipynb   preparation, EDA, function documentation
+│   └── eda.ipynb                 preparation, EDA, function documentation
 ├── data/                         dataset (not in repo)
 ├── outputs/                      generated Excel files
 └── requirements.txt
@@ -102,7 +102,7 @@ Put the key in `.streamlit/secrets.toml`:
 OPENAI_API_KEY = "sk-..."
 ```
 
-Place the dataset in `data/dataset_final_project.xlsx`, then:
+Place the dataset in `data/stock_snapshot.xlsx`, then:
 
 ```bash
 streamlit run app.py
