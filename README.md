@@ -47,7 +47,7 @@ Store names in the project are fictional and the data is anonymised.
 Preparation steps, all documented in the notebook:
 
 - Kept warehouses 1 (HQ), 2 (stores) and 5 (outlets)
-- Footwear only (194 product families reduced to one)
+- Footwear only (181 product families reduced to one)
 - Negative quantities treated as 0 (incomplete transfers in the source system)
 - Brand names unified (`Fila apparel_acc` -> `Fila`, `Munich Sports` -> `Munich`, `Merrell Aces` -> `Merrell Foot`)
 - Sizes converted to a single numeric scale from 8 different source formats (comma decimals, ranges like `39-40` and `3940`, 3-digit half-size codes like `135`, US kids `5Y`/`10C`)
@@ -82,6 +82,7 @@ The query functions live in `src/` so the notebook and the app share the same co
 | `find_reference` | Where a reference exists, by prefix, with quantities per size |
 | `get_quantity` | Stock totals by store and/or brand |
 | `find_model_by_type` | Where a brand or reference exists, grouped by HQ / store / outlet |
+| `get_stock_detail` | A store's actual stock, one row per reference and size |
 | `export_stock` | Full store stock as an Excel size grid |
 
 All of them take the cleaned dataframe as their first argument, so the module holds no hidden state and Streamlit can cache the data.
